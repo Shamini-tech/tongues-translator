@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import "./Auth.css";
 
-export default function AuthPage() {
+export default function AuthPage({ onAuthSuccess }) {
   const [isLogin, setIsLogin] = useState(true);
   const [formData, setFormData] = useState({
     fullName: "",
@@ -15,17 +15,14 @@ export default function AuthPage() {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (isLogin) {
-      console.log("Logging in with:", formData.email, formData.password);
-    } else {
-      console.log("Signing up with:", formData);
+    if (onAuthSuccess) {
+      onAuthSuccess();
     }
   };
 
   return (
     <div className="auth-wrapper">
       <div className="auth-card">
-        {/* Header with Icon and Title aligned together */}
         <div className="auth-header">
           <div className="auth-logo">谷</div>
           <h1 className="auth-title">Tongues</h1>
@@ -37,7 +34,6 @@ export default function AuthPage() {
             : "Create an account to save your translations."}
         </p>
 
-        {/* Tab Toggle */}
         <div className="auth-tabs">
           <button
             type="button"
@@ -55,7 +51,6 @@ export default function AuthPage() {
           </button>
         </div>
 
-        {/* Form */}
         <form onSubmit={handleSubmit} className="auth-form">
           {!isLogin && (
             <input

@@ -1,410 +1,305 @@
-// Import React hooks for managing state, lifecycle side-effects, and persistent values
-import { useState, useEffect, useRef } from 'react';
-// Import language arrays from our central configuration file
-import { LANGUAGES, QUICK } from './languages';
-// Import the login / create account page
-import AuthPage from './AuthPage';
-// Import custom styling rules
-import './App.css';
+import React, { useState, useEffect } from "react";
+import AuthPage from "./AuthPage";
+import "./App.css";
 
-// Backend address: from frontend/.env (VITE_API_URL) or localhost as a fallback
-const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
-// Where the login session (token + user) is remembered in the browser
-const SESSION_KEY = 'tongues_session';
+const QUICK_LANGUAGES = [
+  { code: "en", label: "English" },
+  { code: "es", label: "Spanish" },
+  { code: "hi", label: "Hindi" },
+  { code: "zh", label: "Chinese" },
+  { code: "fr", label: "French" },
+  { code: "ar", label: "Arabic" },
+  { code: "pt", label: "Portuguese" },
+  { code: "ru", label: "Russian" },
+  { code: "bn", label: "Bengali" },
+  { code: "ja", label: "Japanese" },
+];
 
-/* ---------------------------------------------------------------
-   The translator screen (shown only when the user is logged in)
----------------------------------------------------------------- */
-function Translator({ token, user, onLogout }) {
-  // State 1: Input text typed or spoken by the user
-  const [sourceText, setSourceText] = useState('');
-  // State 2: Output translation string returned from backend
-  const [outputText, setOutputText] = useState('');
-  // State 3: Selected source language ('auto' or language name)
-  const [sourceLang, setSourceLang] = useState('auto');
-  // State 4: Selected target language (e.g., 'Spanish')
-  const [targetLang, setTargetLang] = useState('Spanish');
-  // State 5: Boolean flag indicating if an API call is actively in progress
-  const [isTranslating, setIsTranslating] = useState(false);
-  // State 6: Boolean flag indicating if microphone recording is active
-  const [isRecording, setIsRecording] = useState(false);
-  // State 7: Saved translations loaded from MongoDB (this user's only)
-  const [history, setHistory] = useState([]);
-  // State 8: Feedback after clicking Save ('', 'saved' or 'error')
-  const [saveStatus, setSaveStatus] = useState('');
-  // Maximum character limit permitted in input box
-  const MAX_CHARS = 2000;
-  // useRef sequence counter to track request order and solve race conditions
-  const translateSeq = useRef(0);
+const LANGUAGE_MAP = {
+  auto: "English",
+  en: "English",
+  es: "Spanish",
+  fr: "French",
+  de: "German",
+  hi: "Hindi",
+  zh: "Chinese",
+  ar: "Arabic",
+  pt: "Portuguese",
+  ru: "Russian",
+  bn: "Bengali",
+  ja: "Japanese",
+};
 
-  // Headers for requests that need the logged-in user's token
-  const authHeaders = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`
-  };
+export default function App() {
+  // Set to true so it skips the login page and opens the translator directly
+  const [isAuthenticated, setIsAuthenticated] = useState(true);
+  const [sourceLang, setSourceLang] = useState("auto");
+  const [targetLang, setTargetLang] = useState("es");
+  const [inputText, setInputText] = useState("");
+  const [translatedText, setTranslatedText] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
 
-  // Helper function: Find matching language object by name, or return null
-  const getLang = (name) => LANGUAGES.find(l => l.name === name) || null;
+  const [savedItems, setSavedItems] = useState([
+    {
+      id: 1,
+      sourceLabel: "English",
+      targetLabel: "de",
+      original: "How are you?",
+      translated: "Wie geht es dir?",
+    },
+    {
+      id: 2,
+      sourceLabel: "English",
+      targetLabel: "French",
+      original: "Thank you",
+      translated: "Merci",
+    },
+    {
+      id: 3,
+      sourceLabel: "English",
+      targetLabel: "Spanish",
+      original: "Good morning",
+      translated: "Buenos días",
+    },
+    {
+      id: 4,
+      sourceLabel: "English",
+      targetLabel: "Spanish",
+      original: "hello",
+      translated: "hola",
+    },
+  ]);
 
-  // Helper: Convert a saved language code (e.g. 'es') back to a display name (e.g. 'Spanish')
-  const codeToName = (code) => LANGUAGES.find(l => l.tr === code)?.name || null;
-  // Helper: Label shown in the history list
-  const langLabel = (code) => (code === 'auto' ? 'Auto' : codeToName(code) || code);
-
-  // Helper: Current source/target language codes for the backend
-  const getCodes = () => ({
-    srcCode: sourceLang === 'auto' ? 'auto' : (getLang(sourceLang)?.tr || 'auto'),
-    tgtCode: getLang(targetLang)?.tr || 'es'
-  });
-
-  // Load this user's saved translations from the backend
-  const loadHistory = async () => {
-    try {
-      const res = await fetch(`${API}/api/history`, { headers: authHeaders });
-      // Token expired or invalid: send the user back to the login page
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (!res.ok) throw new Error(`History request failed: ${res.status}`);
-      const data = await res.json();
-      setHistory(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error('Could not load history:', err);
-    }
-  };
-
-  // Load history once when the page opens
-  useEffect(() => {
-    loadHistory();
-  }, []);
-
-  // React useEffect Hook: Handles automatic translation triggering and debouncing
-  useEffect(() => {
-    // If text box is empty or only whitespace, clear output and skip API call
-    if (!sourceText.trim()) {
-      setOutputText('');
+  const translateText = async (text, fromLang, toLang) => {
+    if (!text.trim()) {
+      setTranslatedText("");
       return;
     }
 
-    // DEBOUNCE: Delay API call by 500ms so we don't send requests on every single keystroke
-    const timer = setTimeout(async () => {
-      setIsTranslating(true);
-      // Increment sequence counter for every new translation request
-      const currentSeq = ++translateSeq.current;
+    setIsLoading(true);
+    try {
+      const src = fromLang === "auto" ? "en" : fromLang;
+      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(
+        text
+      )}&langpair=${src}|${toLang}`;
 
-      // Extract ISO language codes for backend parameters
-      const { srcCode, tgtCode } = getCodes();
-
-      try {
-        // Send POST request to our Node.js Express backend proxy
-        const res = await fetch(`${API}/api/translate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: sourceText, sourceCode: srcCode, targetCode: tgtCode })
-        });
-
-        const data = await res.json();
-
-        // RACE CONDITION GUARD: If a newer request was sent while this one was fetching, ignore stale data
-        if (currentSeq !== translateSeq.current) return;
-
-        // Update translation output state if data is returned
-        if (data.translated) {
-          setOutputText(data.translated);
-        }
-      } catch (err) {
-        console.error('Translation error:', err);
-      } finally {
-        // Only turn off loading indicator if this is still the active sequence
-        if (currentSeq === translateSeq.current) setIsTranslating(false);
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (data && data.responseData && data.responseData.translatedText) {
+        setTranslatedText(data.responseData.translatedText);
       }
-    }, 500);
+    } catch (error) {
+      console.error("Translation error:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-    // CLEANUP FUNCTION: Cancels pending timer if sourceText/sourceLang/targetLang changes before 500ms
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const timer = setTimeout(() => {
+      if (inputText) {
+        translateText(inputText, sourceLang, targetLang);
+      } else {
+        setTranslatedText("");
+      }
+    }, 400);
+
     return () => clearTimeout(timer);
-  }, [sourceText, sourceLang, targetLang]);
+  }, [inputText, sourceLang, targetLang, isAuthenticated]);
 
-  // Handler: Swaps source and target language selections and text values
   const handleSwap = () => {
-    if (sourceLang === 'auto') return; // Cannot swap if source is set to auto-detect
+    if (sourceLang === "auto") return;
+    const temp = sourceLang;
     setSourceLang(targetLang);
-    setTargetLang(sourceLang);
-    setSourceText(outputText);
+    setTargetLang(temp);
+    setInputText(translatedText);
+    setTranslatedText(inputText);
   };
 
-  // Handler: Copies translated text to clipboard using Web Clipboard API
-  const handleCopy = async () => {
-    if (outputText) await navigator.clipboard.writeText(outputText);
-  };
-
-  // Handler: Saves the current translation to MongoDB, then refreshes the history list
-  const handleSave = async () => {
-    if (!sourceText.trim() || !outputText) return;
-    const { srcCode, tgtCode } = getCodes();
-
-    try {
-      const res = await fetch(`${API}/api/history`, {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({
-          sourceText,
-          translatedText: outputText,
-          sourceCode: srcCode,
-          targetCode: tgtCode
-        })
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (!res.ok) throw new Error(`Save failed: ${res.status}`);
-      setSaveStatus('saved');
-      loadHistory();
-    } catch (err) {
-      console.error('Could not save translation:', err);
-      setSaveStatus('error');
-    }
-    // Hide the message after 2 seconds
-    setTimeout(() => setSaveStatus(''), 2000);
-  };
-
-  // Handler: Deletes one saved translation
-  const handleDelete = async (id) => {
-    try {
-      const res = await fetch(`${API}/api/history/${id}`, {
-        method: 'DELETE',
-        headers: authHeaders
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
-      setHistory(prev => prev.filter(item => item._id !== id));
-    } catch (err) {
-      console.error('Could not delete translation:', err);
-    }
-  };
-
-  // Handler: Puts a saved translation back into the translator
-  const handleReuse = (item) => {
-    setSourceLang(item.sourceCode === 'auto' ? 'auto' : (codeToName(item.sourceCode) || 'auto'));
-    setTargetLang(codeToName(item.targetCode) || targetLang);
-    setSourceText(item.sourceText);
-  };
-
-  // Handler: Pronounces translated output text using Web SpeechSynthesis API
-  const handleSpeak = () => {
-    if (!outputText || !('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel(); // Stop any active speech
-    const utter = new SpeechSynthesisUtterance(outputText); // Create speech instance
-    const langObj = getLang(targetLang);
-    if (langObj?.speech) utter.lang = langObj.speech; // Assign speech locale code (e.g., 'es-ES')
-    window.speechSynthesis.speak(utter); // Speak text aloud
-  };
-
-  // Handler: Captures microphone input using Web SpeechRecognition API
-  const handleMic = () => {
-    const SpeechCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechCtor) return alert('Speech recognition not supported in this browser.');
-
-    const recognizer = new SpeechCtor(); // Initialize recognition instance
-    const langObj = getLang(sourceLang);
-    recognizer.lang = langObj?.speech || 'en-US'; // Set recognition language
-
-    recognizer.onstart = () => setIsRecording(true); // Turn on recording state/ui
-    recognizer.onend = () => setIsRecording(false); // Turn off recording state/ui
-    recognizer.onresult = (e) => {
-      // Concatenate spoken audio result chunks into text transcript
-      const transcript = Array.from(e.results).map(res => res[0].transcript).join('');
-      setSourceText(prev => (prev + ' ' + transcript).trim().slice(0, MAX_CHARS));
+  const handleSaveTranslation = () => {
+    if (!translatedText.trim()) return;
+    const newItem = {
+      id: Date.now(),
+      sourceLabel: LANGUAGE_MAP[sourceLang] || "English",
+      targetLabel: LANGUAGE_MAP[targetLang] || targetLang,
+      original: inputText,
+      translated: translatedText,
     };
-
-    recognizer.start(); // Open browser microphone listening mode
+    if (!savedItems.some((item) => item.translated === translatedText)) {
+      setSavedItems([newItem, ...savedItems]);
+    }
   };
+
+  const handleDeleteSaved = (id) => {
+    setSavedItems(savedItems.filter((item) => item.id !== id));
+  };
+
+  if (!isAuthenticated) {
+    return <AuthPage onAuthSuccess={() => setIsAuthenticated(true)} />;
+  }
 
   return (
-    <div className="app-wrapper">
-      {/* Header section with brand logo, slogan, and the logged-in user */}
-      <header>
-        <div className="brand">
-          <div className="logo-icon">谷</div>
-          <h1>Tongues</h1>
-        </div>
-        <div className="header-right">
-          <div className="tagline">
-            Type it, say it, understand it — in any language.
+    <div className="translator-wrapper">
+      <div className="translator-container">
+        {/* Header */}
+        <header className="app-header">
+          <div className="brand-section">
+            <div className="app-logo">谷</div>
+            <h1 className="app-title">Tongues</h1>
           </div>
-          <div className="user-bar">
-            <span className="user-name">{user?.name}</span>
-            <button className="logout-btn" onClick={onLogout}>Log out</button>
-          </div>
-        </div>
-      </header>
+          <p className="header-tagline">
+            Type it, say it, understand it — in any<br />language.
+          </p>
+        </header>
 
-      {/* Main 3-column translation grid layout */}
-      <div className="translator-grid">
-        {/* LEFT COLUMN: Input controls & textarea */}
-        <div className="column">
+        {/* Dropdowns Bar */}
+        <div className="dropdown-bar">
           <select
-            className="dropdown-select"
+            className="lang-dropdown"
             value={sourceLang}
             onChange={(e) => setSourceLang(e.target.value)}
           >
             <option value="auto">Detect language</option>
-            {LANGUAGES.map(l => (
-              <option key={l.name} value={l.name}>{l.name} — {l.native}</option>
-            ))}
+            <option value="en">English</option>
+            <option value="es">Spanish — Español</option>
+            <option value="fr">French — Français</option>
+            <option value="de">German — Deutsch</option>
+            <option value="hi">Hindi — हिन्दी</option>
           </select>
 
-          <div className="panel">
-            <textarea
-              value={sourceText}
-              onChange={(e) => setSourceText(e.target.value.slice(0, MAX_CHARS))}
-              placeholder="Type here, or tap the microphone to speak…"
-            />
-            <div className="panel-footer">
-              <button className="icon-btn" onClick={handleMic} style={{ color: isRecording ? '#ef4444' : '' }}>
-                🎤
-              </button>
-              <span>{sourceText.length} / {MAX_CHARS}</span>
-              <button className="icon-btn" onClick={() => setSourceText('')}>🗑️</button>
-            </div>
-          </div>
-        </div>
+          <button className="swap-circle-btn" onClick={handleSwap} title="Swap Languages">
+            ⇄
+          </button>
 
-        {/* MIDDLE COLUMN: Swap language button */}
-        <button className="swap-btn" onClick={handleSwap} disabled={sourceLang === 'auto'}>
-          ⇆
-        </button>
-
-        {/* RIGHT COLUMN: Output controls & translated text */}
-        <div className="column">
           <select
-            className="dropdown-select"
+            className="lang-dropdown"
             value={targetLang}
             onChange={(e) => setTargetLang(e.target.value)}
           >
-            {LANGUAGES.map(l => (
-              <option key={l.name} value={l.name}>{l.name} — {l.native}</option>
-            ))}
+            <option value="es">Spanish — Español</option>
+            <option value="en">English</option>
+            <option value="fr">French — Français</option>
+            <option value="de">German — Deutsch</option>
+            <option value="hi">Hindi — हिन्दी</option>
           </select>
+        </div>
 
-          <div className="panel">
-            <div className="output-content">
-              {isTranslating ? (
-                <span className="placeholder-text">Translating…</span>
-              ) : outputText ? (
-                outputText
-              ) : (
-                <span className="placeholder-text">Your translation will appear here.</span>
+        {/* Translation Cards */}
+        <div className="cards-grid">
+          {/* Input Card */}
+          <div className="translation-card">
+            <textarea
+              className="translation-textarea"
+              placeholder="Type here, or tap the microphone to speak..."
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              maxLength={2000}
+            />
+            <div className="card-toolbar">
+              <button className="icon-action-btn" title="Speak input">🎙️</button>
+              <span className="char-counter">{inputText.length} / 2000</span>
+              {inputText && (
+                <button
+                  className="icon-action-btn"
+                  onClick={() => {
+                    setInputText("");
+                    setTranslatedText("");
+                  }}
+                  title="Clear input"
+                >
+                  🗑️
+                </button>
               )}
             </div>
-            <div className="panel-footer">
-              <button className="icon-btn" onClick={handleSpeak} disabled={!outputText}>🔊</button>
-              <button className="icon-btn" onClick={handleCopy} disabled={!outputText}>📋</button>
-              <button
-                className="icon-btn"
-                onClick={handleSave}
-                disabled={!outputText || isTranslating}
-                title="Save this translation"
-              >
-                💾
-              </button>
-              {saveStatus === 'saved' && <span className="save-status">Saved ✓</span>}
-              {saveStatus === 'error' && <span className="save-status error">Could not save</span>}
+          </div>
+
+          {/* Output Card */}
+          <div className="translation-card">
+            <textarea
+              className="translation-textarea"
+              placeholder={isLoading ? "Translating..." : "Your translation will appear here."}
+              value={translatedText}
+              readOnly
+            />
+            <div className="card-toolbar">
+              <div className="left-icons">
+                <button className="icon-action-btn" title="Listen to translation">🔊</button>
+              </div>
+
+              <div className="right-icons">
+                <button
+                  className="icon-action-btn"
+                  onClick={() => navigator.clipboard.writeText(translatedText)}
+                  title="Copy translation"
+                  disabled={!translatedText}
+                >
+                  📋
+                </button>
+                <button
+                  className="icon-action-btn"
+                  onClick={handleSaveTranslation}
+                  title="Save translation"
+                  disabled={!translatedText}
+                >
+                  🔖
+                </button>
+                <button
+                  className="icon-action-btn"
+                  onClick={() => setTranslatedText("")}
+                  title="Clear output"
+                  disabled={!translatedText}
+                >
+                  🗑️
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Quick selection chips section */}
-      <div className="quick-section">
-        <h3>Quick languages</h3>
-        <div className="quick-chips">
-          {QUICK.map(name => (
-            <button
-              key={name}
-              className={`chip ${targetLang === name ? 'active' : ''}`}
-              onClick={() => setTargetLang(name)}
-            >
-              {name.replace(' (Simplified)', '')}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Saved translations loaded from MongoDB */}
-      <div className="history-section">
-        <h3>Saved translations</h3>
-        {history.length === 0 ? (
-          <p className="placeholder-text">Nothing saved yet. Translate something and tap 💾.</p>
-        ) : (
-          <ul className="history-list">
-            {history.map(item => (
-              <li key={item._id} className="history-item">
-                <button
-                  className="history-main"
-                  onClick={() => handleReuse(item)}
-                  title="Use this translation again"
-                >
-                  <span className="history-langs">
-                    {langLabel(item.sourceCode)} → {langLabel(item.targetCode)}
-                  </span>
-                  <span className="history-source">{item.sourceText}</span>
-                  <span className="history-target">{item.translatedText}</span>
-                </button>
-                <button
-                  className="icon-btn"
-                  onClick={() => handleDelete(item._id)}
-                  title="Delete"
-                >
-                  ✕
-                </button>
-              </li>
+        {/* Quick Languages */}
+        <div className="quick-languages-section">
+          <div className="quick-title">Quick languages</div>
+          <div className="quick-pills">
+            {QUICK_LANGUAGES.map((lang) => (
+              <button
+                key={lang.code}
+                className={`pill-btn ${targetLang === lang.code ? "active" : ""}`}
+                onClick={() => setTargetLang(lang.code)}
+              >
+                {lang.label}
+              </button>
             ))}
-          </ul>
+          </div>
+        </div>
+
+        {/* Saved Translations Section Directly Below Quick Languages */}
+        {savedItems.length > 0 && (
+          <div className="saved-section">
+            <div className="saved-list">
+              {savedItems.map((item) => (
+                <div key={item.id} className="saved-card">
+                  <div className="saved-content">
+                    <span className="saved-language-tag">
+                      {item.sourceLabel} → {item.targetLabel}
+                    </span>
+                    <p className="saved-original">{item.original}</p>
+                    <p className="saved-translated">{item.translated}</p>
+                  </div>
+                  <button
+                    className="delete-saved-btn"
+                    onClick={() => handleDeleteSaved(item.id)}
+                    title="Remove item"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </div>
     </div>
   );
-}
-
-/* ---------------------------------------------------------------
-   App: decides between the login page and the translator
----------------------------------------------------------------- */
-export default function App() {
-  // Restore a previous login (token + user) from this browser, if any
-  const [session, setSession] = useState(() => {
-    try {
-      const raw = localStorage.getItem(SESSION_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
-  });
-
-  // Called by AuthPage after a successful login, sign-up, or Google sign-in
-  const handleAuth = (data) => {
-    const next = { token: data.token, user: data.user };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(next));
-    setSession(next);
-  };
-
-  // Log out: forget the token and return to the login page
-  const handleLogout = () => {
-    localStorage.removeItem(SESSION_KEY);
-    setSession(null);
-  };
-
-  if (!session) {
-    return (
-      <div className="auth-wrapper">
-        <AuthPage onAuth={handleAuth} />
-      </div>
-    );
-  }
-
-  return <Translator token={session.token} user={session.user} onLogout={handleLogout} />;
 }
