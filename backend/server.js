@@ -1,27 +1,34 @@
-// Load variables from backend/.env (e.g. MONGODB_URI) into process.env
+// Load variables from backend/.env (MONGODB_URI, JWT_SECRET, GOOGLE_CLIENT_ID) into process.env
 import 'dotenv/config';
 // Import the Express framework to create our HTTP web server
 import express from 'express';
 // Import CORS middleware to allow cross-origin requests from our React frontend (port 5173)
 import cors from 'cors';
-// Import node-fetch to make HTTP requests from Node.js to external APIs (Google & MyMemory)
+// Import node-fetch to make HTTP requests from Node.js to external APIs
 import fetch from 'node-fetch';
 // Import Mongoose to talk to MongoDB
 import mongoose from 'mongoose';
 // Import the Translation model (history of saved translations)
 import Translation from './models/Translation.js';
+// Import login / register / Google routes and the JWT guard
+import authRoutes from './routes/auth.js';
+import { requireAuth } from './middleware/auth.js';
 
 // Initialize the Express application instance
 const app = express();
 // Use the port given by the host (Render) or fall back to 5000 locally
 const PORT = process.env.PORT || 5000;
 
+if (!process.env.JWT_SECRET) {
+  console.error('JWT_SECRET is missing in .env. Login and history will not work until it is set.');
+}
+
 // Middleware 1: Enable CORS so browsers permit port 5173 to talk to port 5000
 app.use(cors());
 // Middleware 2: Automatically parse incoming request bodies containing raw JSON into req.body
 app.use(express.json());
 
-// Connect to MongoDB. If it fails, translation still works; only /api/history will fail.
+// Connect to MongoDB. If it fails, translation still works; only login/history will fail.
 try {
   await mongoose.connect(process.env.MONGODB_URI);
   console.log('MongoDB connected');
@@ -30,117 +37,203 @@ try {
 }
 
 /**
- * Helper function to translate text via Google Translate's public endpoint.
- * @param {string} text - The input string to translate
- * @param {string} sourceCode - Source language code (e.g., 'en' or 'auto')
- * @param {string} targetCode - Target language code (e.g., 'es')
+ * Option 1: Google Translate public endpoint
  */
 async function translateViaGoogle(text, sourceCode, targetCode) {
-  // Format the URL with query parameters, using encodeURIComponent to handle spaces/symbols safely
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sourceCode}&tl=${targetCode}&dt=t&q=${encodeURIComponent(text)}`;
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sourceCode)}&tl=${encodeURIComponent(targetCode)}&dt=t&q=${encodeURIComponent(text)}`;
 
-  // Send an asynchronous GET request to Google's translation service
-  const res = await fetch(url);
-  // Throw an error if Google returns an HTTP error status code (e.g., 429 Rate Limited or 500 Server Error)
-  if (!res.ok) throw new Error(`Google responded ${res.status}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
 
-  // Parse the raw response into a JSON array
-  const data = await res.json();
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+      }
+    });
 
-  // Google breaks long translations into array chunks: data[0] contains pairs like [['Hola', 'Hello']]
-  // .map() extracts the translated string from each pair, and .join('') combines them into a full sentence
-  return data[0].map(chunk => chunk[0]).join('');
+    if (!res.ok) throw new Error(`Google responded ${res.status}`);
+
+    const data = await res.json();
+    return data[0].map(chunk => chunk[0]).join('');
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
- * Fallback helper function to translate text via MyMemory API if Google fails.
- * @param {string} text - The input string to translate
- * @param {string} sourceCode - Source language code (e.g., 'en' or 'auto')
- * @param {string} targetCode - Target language code (e.g., 'es')
+ * Option 2: LibreTranslate via Argos Open Tech
+ */
+async function translateViaLibre(text, sourceCode, targetCode) {
+  const url = 'https://translate.argosopentech.com/translate';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        q: text,
+        source: sourceCode === 'auto' ? 'auto' : sourceCode,
+        target: targetCode,
+        format: 'text'
+      })
+    });
+
+    if (!res.ok) throw new Error(`LibreTranslate responded ${res.status}`);
+    const data = await res.json();
+    if (!data?.translatedText) throw new Error('LibreTranslate returned no translation');
+
+    return data.translatedText;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Option 3: Lingva Mirror Instance (fyralabs)
+ */
+async function translateViaLingva(text, sourceCode, targetCode) {
+  const url = `https://lingva.fyralabs.com/api/v1/${encodeURIComponent(sourceCode)}/${encodeURIComponent(targetCode)}/${encodeURIComponent(text)}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Lingva responded ${res.status}`);
+
+    const data = await res.json();
+    if (!data?.translation) throw new Error('Lingva returned no translation');
+
+    return data.translation;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Option 4: MyMemory API (Last resort fallback)
  */
 async function translateViaMyMemory(text, sourceCode, targetCode) {
-  // MyMemory does NOT support auto-detection ('auto'). If 'auto' is passed, default source language to 'en'
   const sl = sourceCode === 'auto' ? 'en' : sourceCode;
-
-  // Format the MyMemory endpoint URL with language pairs (e.g., langpair=en|es)
   const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${sl}|${targetCode}`;
 
-  // Send an asynchronous GET request to MyMemory
   const res = await fetch(url);
   if (!res.ok) throw new Error(`MyMemory responded ${res.status}`);
 
   const data = await res.json();
-
-  // Safely extract the translated string using optional chaining (?.) to prevent crashes
   const translated = data?.responseData?.translatedText;
   if (!translated) throw new Error('MyMemory returned no translation');
 
   return translated;
 }
 
-// Health check (useful for uptime pingers on free hosting)
+// Remember recent good translations
+const translationCache = new Map();
+const CACHE_LIMIT = 500;
+
+// Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ ok: true });
 });
 
-// Define POST endpoint route at '/api/translate'
+// Account routes
+app.use('/api/auth', authRoutes);
+
+// Translation route
 app.post('/api/translate', async (req, res) => {
-  // Destructure payload properties sent from the React client
   const { text, sourceCode, targetCode } = req.body;
 
-  // Validation: Guard clause to return a 400 Bad Request error if input text is empty
   if (!text) {
     return res.status(400).json({ error: 'Text input is required.' });
   }
 
-  try {
-    // Attempt 1: Call Google Translate primary provider
-    const translated = await translateViaGoogle(text, sourceCode, targetCode);
-    // Return successful translation as JSON back to React
-    res.json({ translated });
-  } catch (err) {
-    // Log warning if primary call fails
-    console.warn('Google endpoint failed, falling back to MyMemory:', err.message);
+  const cacheKey = `${sourceCode}|${targetCode}|${text}`;
+  if (translationCache.has(cacheKey)) {
+    return res.json({ translated: translationCache.get(cacheKey) });
+  }
 
-    try {
-      // Attempt 2: Failover to MyMemory secondary provider
-      const fallbackTranslated = await translateViaMyMemory(text, sourceCode, targetCode);
-      // Return fallback translation back to React
-      res.json({ translated: fallbackTranslated });
-    } catch (fallbackErr) {
-      // If both Google and MyMemory fail, return a 500 Internal Server Error
-      res.status(500).json({ error: 'Translation failed on all providers.' });
+  const remember = (translated) => {
+    if (translationCache.size >= CACHE_LIMIT) {
+      translationCache.delete(translationCache.keys().next().value);
     }
+    translationCache.set(cacheKey, translated);
+  };
+
+  // Attempt 1: Google Translate
+  try {
+    const translated = await translateViaGoogle(text, sourceCode, targetCode);
+    remember(translated);
+    return res.json({ translated });
+  } catch (err) {
+    console.warn('Google failed:', err.message);
+  }
+
+  // Attempt 2: LibreTranslate
+  try {
+    const translated = await translateViaLibre(text, sourceCode, targetCode);
+    console.log('Translated via LibreTranslate');
+    remember(translated);
+    return res.json({ translated });
+  } catch (err) {
+    console.warn('LibreTranslate failed:', err.message);
+  }
+
+  // Attempt 3: Lingva Mirror
+  try {
+    const translated = await translateViaLingva(text, sourceCode, targetCode);
+    console.log('Translated via Lingva');
+    remember(translated);
+    return res.json({ translated });
+  } catch (err) {
+    console.warn('Lingva failed:', err.message);
+  }
+
+  // Attempt 4: MyMemory (Last Resort)
+  try {
+    const translated = await translateViaMyMemory(text, sourceCode, targetCode);
+    console.log('Translated via MyMemory (last resort)');
+    return res.json({ translated });
+  } catch (err) {
+    console.error('All providers failed:', err.message);
+    return res.status(500).json({ error: 'Translation failed on all providers.' });
   }
 });
 
 // ---------- History routes (MongoDB) ----------
 
-// Save a translation to history
-app.post('/api/history', async (req, res) => {
+app.post('/api/history', requireAuth, async (req, res) => {
   try {
     const { sourceText, translatedText, sourceCode, targetCode } = req.body;
-    const saved = await Translation.create({ sourceText, translatedText, sourceCode, targetCode });
+    const saved = await Translation.create({
+      user: req.userId,
+      sourceText,
+      translatedText,
+      sourceCode,
+      targetCode,
+    });
     res.status(201).json(saved);
   } catch (err) {
     res.status(400).json({ error: 'Could not save translation.' });
   }
 });
 
-// Get the latest 20 saved translations, newest first
-app.get('/api/history', async (req, res) => {
+app.get('/api/history', requireAuth, async (req, res) => {
   try {
-    const items = await Translation.find().sort({ createdAt: -1 }).limit(20);
+    const items = await Translation.find({ user: req.userId }).sort({ createdAt: -1 }).limit(20);
     res.json(items);
   } catch (err) {
     res.status(500).json({ error: 'Could not load history.' });
   }
 });
 
-// Delete one saved translation by its id
-app.delete('/api/history/:id', async (req, res) => {
+app.delete('/api/history/:id', requireAuth, async (req, res) => {
   try {
-    await Translation.findByIdAndDelete(req.params.id);
+    await Translation.findOneAndDelete({ _id: req.params.id, user: req.userId });
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: 'Could not delete translation.' });

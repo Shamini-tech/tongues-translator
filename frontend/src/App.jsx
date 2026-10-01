@@ -2,13 +2,20 @@
 import { useState, useEffect, useRef } from 'react';
 // Import language arrays from our central configuration file
 import { LANGUAGES, QUICK } from './languages';
+// Import the login / create account page
+import AuthPage from './AuthPage';
 // Import custom styling rules
 import './App.css';
 
 // Backend address: from frontend/.env (VITE_API_URL) or localhost as a fallback
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+// Where the login session (token + user) is remembered in the browser
+const SESSION_KEY = 'tongues_session';
 
-export default function App() {
+/* ---------------------------------------------------------------
+   The translator screen (shown only when the user is logged in)
+---------------------------------------------------------------- */
+function Translator({ token, user, onLogout }) {
   // State 1: Input text typed or spoken by the user
   const [sourceText, setSourceText] = useState('');
   // State 2: Output translation string returned from backend
@@ -21,7 +28,7 @@ export default function App() {
   const [isTranslating, setIsTranslating] = useState(false);
   // State 6: Boolean flag indicating if microphone recording is active
   const [isRecording, setIsRecording] = useState(false);
-  // State 7: Saved translations loaded from MongoDB
+  // State 7: Saved translations loaded from MongoDB (this user's only)
   const [history, setHistory] = useState([]);
   // State 8: Feedback after clicking Save ('', 'saved' or 'error')
   const [saveStatus, setSaveStatus] = useState('');
@@ -29,6 +36,12 @@ export default function App() {
   const MAX_CHARS = 2000;
   // useRef sequence counter to track request order and solve race conditions
   const translateSeq = useRef(0);
+
+  // Headers for requests that need the logged-in user's token
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`
+  };
 
   // Helper function: Find matching language object by name, or return null
   const getLang = (name) => LANGUAGES.find(l => l.name === name) || null;
@@ -44,10 +57,15 @@ export default function App() {
     tgtCode: getLang(targetLang)?.tr || 'es'
   });
 
-  // Load saved translations from the backend
+  // Load this user's saved translations from the backend
   const loadHistory = async () => {
     try {
-      const res = await fetch(`${API}/api/history`);
+      const res = await fetch(`${API}/api/history`, { headers: authHeaders });
+      // Token expired or invalid: send the user back to the login page
+      if (res.status === 401) {
+        onLogout();
+        return;
+      }
       if (!res.ok) throw new Error(`History request failed: ${res.status}`);
       const data = await res.json();
       setHistory(Array.isArray(data) ? data : []);
@@ -128,7 +146,7 @@ export default function App() {
     try {
       const res = await fetch(`${API}/api/history`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           sourceText,
           translatedText: outputText,
@@ -136,6 +154,10 @@ export default function App() {
           targetCode: tgtCode
         })
       });
+      if (res.status === 401) {
+        onLogout();
+        return;
+      }
       if (!res.ok) throw new Error(`Save failed: ${res.status}`);
       setSaveStatus('saved');
       loadHistory();
@@ -150,7 +172,14 @@ export default function App() {
   // Handler: Deletes one saved translation
   const handleDelete = async (id) => {
     try {
-      const res = await fetch(`${API}/api/history/${id}`, { method: 'DELETE' });
+      const res = await fetch(`${API}/api/history/${id}`, {
+        method: 'DELETE',
+        headers: authHeaders
+      });
+      if (res.status === 401) {
+        onLogout();
+        return;
+      }
       if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
       setHistory(prev => prev.filter(item => item._id !== id));
     } catch (err) {
@@ -197,14 +226,20 @@ export default function App() {
 
   return (
     <div className="app-wrapper">
-      {/* Header section with brand logo and slogan */}
+      {/* Header section with brand logo, slogan, and the logged-in user */}
       <header>
         <div className="brand">
           <div className="logo-icon">谷</div>
           <h1>Tongues</h1>
         </div>
-        <div className="tagline">
-          Type it, say it, understand it — in any language.
+        <div className="header-right">
+          <div className="tagline">
+            Type it, say it, understand it — in any language.
+          </div>
+          <div className="user-bar">
+            <span className="user-name">{user?.name}</span>
+            <button className="logout-btn" onClick={onLogout}>Log out</button>
+          </div>
         </div>
       </header>
 
@@ -334,4 +369,35 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+/* ---------------------------------------------------------------
+   App: decides between the login page and the translator
+---------------------------------------------------------------- */
+export default function App() {
+  // Restore a previous login (token + user) from this browser, if any
+  const [session, setSession] = useState(() => {
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Called by AuthPage after a successful login, sign-up, or Google sign-in
+  const handleAuth = (data) => {
+    const next = { token: data.token, user: data.user };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(next));
+    setSession(next);
+  };
+
+  // Log out: forget the token and return to the login page
+  const handleLogout = () => {
+    localStorage.removeItem(SESSION_KEY);
+    setSession(null);
+  };
+
+  if (!session) return <AuthPage onAuth={handleAuth} />;
+  return <Translator token={session.token} user={session.user} onLogout={handleLogout} />;
 }
