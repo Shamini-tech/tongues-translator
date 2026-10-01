@@ -31,8 +31,8 @@ const LANGUAGE_MAP = {
 };
 
 export default function App() {
-  // Set to true so it skips the login page and opens the translator directly
-  const [isAuthenticated, setIsAuthenticated] = useState(true);
+  // Set to false by default so the login page appears first
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [sourceLang, setSourceLang] = useState("auto");
   const [targetLang, setTargetLang] = useState("es");
   const [inputText, setInputText] = useState("");
@@ -136,6 +136,7 @@ export default function App() {
     setSavedItems(savedItems.filter((item) => item.id !== id));
   };
 
+  // If not logged in, show AuthPage
   if (!isAuthenticated) {
     return <AuthPage onAuthSuccess={() => setIsAuthenticated(true)} />;
   }
@@ -143,15 +144,33 @@ export default function App() {
   return (
     <div className="translator-wrapper">
       <div className="translator-container">
-        {/* Header */}
+        {/* Header with Logout Button */}
         <header className="app-header">
           <div className="brand-section">
             <div className="app-logo">谷</div>
             <h1 className="app-title">Tongues</h1>
           </div>
-          <p className="header-tagline">
-            Type it, say it, understand it — in any<br />language.
-          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: "1.5rem" }}>
+            <p className="header-tagline" style={{ textAlign: "right" }}>
+              Type it, say it, understand it — in any<br />language.
+            </p>
+            <button
+              onClick={() => setIsAuthenticated(false)}
+              style={{
+                background: "#fff",
+                border: "1px solid #dcdfe1",
+                padding: "0.4rem 0.9rem",
+                borderRadius: "20px",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                color: "#1a2e26",
+                fontWeight: 500,
+              }}
+              title="Log out"
+            >
+              Log out
+            </button>
+          </div>
         </header>
 
         {/* Dropdowns Bar */}
@@ -274,7 +293,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Saved Translations Section Directly Below Quick Languages */}
+        {/* Saved Translations Section */}
         {savedItems.length > 0 && (
           <div className="saved-section">
             <div className="saved-list">
