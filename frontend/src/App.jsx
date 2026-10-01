@@ -398,6 +398,13 @@ export default function App() {
     setSession(null);
   };
 
-  if (!session) return <AuthPage onAuth={handleAuth} />;
+  if (!session) {
+    return (
+      <div className="auth-wrapper">
+        <AuthPage onAuth={handleAuth} />
+      </div>
+    );
+  }
+
   return <Translator token={session.token} user={session.user} onLogout={handleLogout} />;
 }
